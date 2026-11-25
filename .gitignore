@@ -23,3 +23,8 @@ __pycache__/
 *.pptx
 *.eps
 *.pdf
+*.pack
+*.template
+time.header
+/run-public/
+/run-plain/

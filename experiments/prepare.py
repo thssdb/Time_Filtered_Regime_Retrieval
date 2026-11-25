@@ -37,7 +37,7 @@ def synthetic():
     return t.astype("<i8"), decimals[codes+100]
 
 
-def prepare(root, clocks, signals):
+def prepare(root, clocks, signals, legacy_decimal=False):
     db = "collection"
     source = root/"prepared"/db
     time = root/"time"/db
@@ -45,7 +45,6 @@ def prepare(root, clocks, signals):
     for directory in (source, time, inputs, root/"templates"):
         directory.mkdir(parents=True)
     raw = np.asarray(signals, dtype="<f4").transpose(0,2,1).copy()
-    raw[raw==0] = 0.0
     if not np.isfinite(raw).all():
         raise ValueError("Expected finite FP32 input")
     order = np.argsort(clocks[:,-1], kind="stable").astype("<u4")
@@ -63,19 +62,20 @@ def prepare(root, clocks, signals):
     scalers.tofile(root/"scalers.f64")
     z = np.hstack([(x.astype(float)-mean)/sd for x,(mean,sd) in zip(channels,scalers)])
     z[order].astype("<f4").tofile(time/"time_route.f32")
-    specs=[]
-    for c in range(3):
-        v = signals[:,:,c]
-        getcontext().prec = max(40, max(len(x.as_tuple().digits) for x in v.flat))
-        exponent = max(0,-min(x.normalize().as_tuple().exponent for x in v.flat))
-        table, inverse = np.unique(v, return_inverse=True)
-        integers = [int(x.scaleb(exponent)) for x in table]
-        width = next(w for w in (1,2,4,8,16) if min(integers)>=-(1<<(8*w-1))
-                     and max(integers)<(1<<(8*w-1)))
-        (inputs/f"{c}.integers").write_bytes(b"".join(x.to_bytes(width,"little",signed=True) for x in integers))
-        np.save(inputs/f"{c}.input_keys.npy",inverse.reshape(v.shape))
-        specs.append(dict(db=db,column=c,decimal_exponent=exponent,signed_bytes=width))
-    (root/"inputs/grid.json").write_text(json.dumps(specs))
+    if legacy_decimal:
+        specs=[]
+        for c in range(3):
+            v = signals[:,:,c]
+            getcontext().prec = max(40, max(len(x.as_tuple().digits) for x in v.flat))
+            exponent = max(0,-min(x.normalize().as_tuple().exponent for x in v.flat))
+            table, inverse = np.unique(v, return_inverse=True)
+            integers = [int(x.scaleb(exponent)) for x in table]
+            width = next(w for w in (1,2,4,8,16) if min(integers)>=-(1<<(8*w-1))
+                         and max(integers)<(1<<(8*w-1)))
+            (inputs/f"{c}.integers").write_bytes(b"".join(x.to_bytes(width,"little",signed=True) for x in integers))
+            np.save(inputs/f"{c}.input_keys.npy",inverse.reshape(v.shape))
+            specs.append(dict(db=db,column=c,decimal_exponent=exponent,signed_bytes=width))
+        (root/"inputs/grid.json").write_text(json.dumps(specs))
     blocks = []
     begin = 0
     for i in range(1,len(order)+1):
@@ -93,9 +93,10 @@ if __name__ == "__main__":
     inputs.add_argument("--synthetic",action="store_true")
     inputs.add_argument("--csv",type=Path)
     ap.add_argument("--weights",type=Path,help="42 little-endian float64 coordinate weights fitted on a knowledge base")
+    ap.add_argument("--legacy-decimal",action="store_true",help="also prepare the scaled-decimal inputs for the historical encoder")
     args=ap.parse_args()
     values=synthetic() if args.synthetic else read_segments(args.csv)
-    prepare(args.out,*values)
+    prepare(args.out,*values,legacy_decimal=args.legacy_decimal)
     hist=np.linspace(.5,1.,6)
     cov=np.r_[hist,np.ones(7),np.linspace(1.,.5,5)]
     weights=np.r_[hist,cov,cov] if not args.weights else np.fromfile(args.weights,"<f8")

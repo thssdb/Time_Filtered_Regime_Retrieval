@@ -5,15 +5,15 @@ This repository contains the retrieval index, compressed storage implementation 
 | Directory | Contents |
 | --- | --- |
 | [index](index) | FAISS IVF with a centroid HNSW, weighted-cosine routing and scoring, weighted-distance reranking, time pruning and a four-way ablation |
-| [storage](storage) | Decimal scaling, First-32 differences, residual dictionaries, Rice encoder, position mapping and native random reader for timestamps and values |
-| [iotdb](iotdb) | Aligned time and value pages, IoTDB resource metadata writer and SQL UDTF |
+| [storage](storage) | Start-time templates, physical position mapping, the eight-byte PLAIN baseline and the legacy decimal codec |
+| [iotdb](iotdb) | Seekable Group-64 Rice encoder and reader, aligned time and value pages, resource metadata writer and SQL UDTF |
 | [experiments](experiments) | Preprocessing, build driver, paired benchmark, exhaustive reference, bitwise verification, component timings and SQL bridge |
-| [experiments/public_datasets](experiments/public_datasets) | 60-sample First-32 encoder and full-dataset decoder for the public-dataset value experiment |
-| [figures](figures) | Sources for Figures 1–13, synthetic method examples and evaluation charts |
+| [experiments/public_datasets](experiments/public_datasets) | Public-data block ordering and the archived First-32 comparison |
+| [figures](figures) | Existing plotting utilities and synthetic method examples; filenames retain their earlier numbering |
 
 ## Build
 
-Use a little-endian Linux or macOS system, Python 3.10+, CMake 3.24+, a C++20 compiler, OpenMP, BLAS/LAPACK, LZ4 development files, Java 17 and Maven. The source patch is applied **to a build-directory copy** of the pinned upstream FAISS checkout. This builds the HNSW time gate into the actual FAISS search loop. The third-party FAISS license is in [index/FAISS-LICENSE](index/FAISS-LICENSE).
+Set `JAVA_HOME` to a JDK installation so CMake can find the JNI headers. Use a little-endian Linux or macOS system, Python 3.10+, CMake 3.24+, a C++20 compiler, OpenMP, BLAS/LAPACK, LZ4 development files, Java 17 and Maven. The source patch is applied **to a build-directory copy** of the pinned upstream FAISS checkout. This builds the HNSW time gate into the actual FAISS search loop. The third-party FAISS license is in [index/FAISS-LICENSE](index/FAISS-LICENSE).
 
 ```sh
 python3 -m venv .venv
@@ -52,12 +52,16 @@ A query admits segments whose end time falls in the half-open interval `[lo, hi)
 
 | Experiment | Arms | Controlled comparison |
 | --- | --- | --- |
-| Single index | `weighted_row`, `weighted_slice` | Same index and First-32 store. Per-posting time checks versus an L0 one-hop time gate plus two list bounds |
+| Single index | `weighted_row`, `weighted_slice` | Same index and Group-64 store. Per-posting time checks versus an L0 one-hop time gate plus two list bounds |
 | Time-sharded index | `all_scan`, `skip_scan`, `all_binary_packed`, `skip_binary_packed` | Same shard indexes and store. Toggle skipping disjoint shard graphs and binary lookup of the posting interval independently |
 
-The native reader recovers 18 timestamps and 54 FP32 values for each selected identifier. Timestamps are chronological. Within each block the value writer starts with the earliest segment and repeatedly appends the nearest unvisited segment. Every 32 positions it writes absolute values. Within a group the encoder differences scaled integers against that group's first segment at the same sample position. It assigns dictionary keys to the differences, then Rice-codes key differences relative to the first residual key at that position. A four-byte locator links the timestamp position and the value position. The `--group` and `--reference` options of [storage/encode.py](storage/encode.py) expose the reference ablation.
+The resident reader recovers all 18 timestamps and 54 original FP32 readings for each selected segment. For time, the store writes a segment start and a two-bit identifier of its sample-offset template. If more than four templates occur, consecutive segments share local tables of up to four identifiers into a common template pool. The native reader handles the private TIM1 time-page tag (0xfe).
 
-Benchmark `mean_us`, `p50_us` and `p95_us` include command submission to the resident worker and receipt of the full records. `native_p50_us` is the median sum of time inside native search and native fetch. `fetch_p50_us` is decode and fetch time in the native reader. Recall is measured against the exhaustive window reference. Every timed response is checked against the original timestamp bytes and FP32 bits after stopping the timer. To build the four-way ablation chart, pass eight **independently measured** nine-window benchmark files to `experiments/figure_inputs.py OUTPUT BATCH1 ... BATCH8`. It computes per-arm means of batch medians and Student-t confidence intervals.
+For values, each signal has a sorted dictionary of its original FP32 bit patterns. Within each chronological block the writer starts at the earliest segment and repeatedly selects the nearest unvisited segment. In each group of up to 64 segments the writer stores the first segment's dictionary keys. At each sample position it ZigZag- and Rice-encodes the signed difference from the corresponding first key. A segment offset locates its codewords directly. The reader unpacks the first keys once and decodes at most one nonfirst payload per signal for a selected segment. A four-byte locator maps a retrieval rank to its time and value positions. Dictionaries, first keys, offsets, and codes are embedded in the aligned data files. The SQL bridge uses this reader on a newly built store.
+
+[BuildValuePages](iotdb/BuildValuePages.java) accepts the physical placement, group size and reference (`first` or `previous`) so the reference and ordering comparisons can share one encoder. [SeekPack](iotdb/SeekPack.java) includes full reconstruction and sparse-seek checks. The former scaled-decimal First-32 encoder remains available in [storage/encode.py](storage/encode.py) with inputs from `experiments/prepare.py --legacy-decimal`. Existing First-32 stores can still be queried.
+
+Benchmark `mean_us`, `p50_us` and `p95_us` include command submission to the resident worker and receipt of the full records. `native_p50_us` is the median of index search time plus record fetch time inside the two workers. `fetch_p50_us` is decode and fetch time in the resident reader. Recall is measured against the exhaustive window reference. Every timed response is checked against the original timestamp bytes and FP32 bits after stopping the timer. To build the four-way ablation chart, pass eight **independently measured** nine-window benchmark files to `experiments/figure_inputs.py OUTPUT BATCH1 ... BATCH8`. It computes per-arm means of batch medians and Student-t confidence intervals.
 
 ### IoTDB SQL interface
 
@@ -88,6 +92,15 @@ python figures/render.py methods --build build --output figures/render
 python figures/render.py evaluation --input /path/to/aggregate-csvs --output figures/render
 ```
 
-Figures 1–6 use synthetic signals and indexes built on the caller's machine. Figures 1, 5 and 6 are portable redrawings of the paper illustrations. Figure 1 deliberately uses generated curves. Figures 7–13 render the supplied aggregate measurements. Editable charts are written as PPTX and vector plots as EPS. Figure 10 also exports its editable chart via LibreOffice, Ghostscript and `ps2eps`. Figure 2 uses `fc-match` for the numeric font metrics. Install Linux Biolinum O and STIX Two Text to match the chart typography. See [figure inputs](figures/README.md) for the required measurement fields and which charts can be populated directly by the synthetic benchmark.
+Figures 1–6 use synthetic signals and indexes built on the caller's machine. Figures 1, 5 and 6 are portable redrawings of the paper illustrations. Figure 1 deliberately uses generated curves. The evaluation scripts render caller-supplied aggregate measurements and retain their original figure numbering. Editable charts are written as PPTX and vector plots as EPS. Figure 10 also exports its editable chart via LibreOffice, Ghostscript and `ps2eps`. Figure 2 uses `fc-match` for the numeric font metrics. Install Linux Biolinum O and STIX Two Text to match the chart typography. See [figure inputs](figures/README.md) for the required measurement fields and which charts can be populated directly by the synthetic benchmark.
 
-Compression ratio uses eight bytes per original scalar divided by measured encoded bytes. For a combined ratio, sum scalar counts and encoded byte counts before dividing.
+## Rebuild the storage comparisons
+
+For a prepared public dataset with 60 sample positions, run the following command. It uses the same seekable Group-64 encoder as the SQL reader. Supply a directory named `NASA_battery`, `Hydraulic_system`, or `metropt3` containing channel-major `raw54.f32`, `point_time_ns.i64`, `business_order.u32`, and `tail_offsets.u64`. The writer verifies the value packs and the timestamp column on readback.
+
+```sh
+python storage/build_public_store.py /path/to/NASA_battery run-public
+python storage/plain_columns.py run/prepared/collection run/templates/collection.placement.tsv run-plain
+```
+
+The compression ratio divides eight bytes per original scalar by the measured payload bytes. The PLAIN comparison writes one INT64 per timestamp and one FP64 per reading, giving 1× for the payload. For the public-data combined ratio, the denominator sums the timestamp column and the self-contained signal packs, including dictionaries and segment offsets. Intermediate build files are excluded. SQL data-file comparisons additionally count container metadata. Decompression time measures recovery with the winning positions already known. SQL latency also includes retrieval, transport and delivery to the client.

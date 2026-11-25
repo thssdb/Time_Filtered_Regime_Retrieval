@@ -1,6 +1,7 @@
 """Resident native workers. Time ranks index the chronological locator directory."""
 import json
 import os
+import sys
 import struct
 import subprocess
 from contextlib import ExitStack
@@ -16,7 +17,16 @@ class Workers:
         self.stack = ExitStack()
         try:
             self.search = self.open("search", self.run/"time/collection", self.run/"index.faiss")
-            self.reader = self.open("read_records", "collection", self.run/"stores")
+            store = self.run / "first64/collection/data"
+            if store.is_dir():
+                target = Path(__file__).resolve().parents[1] / "iotdb/target"
+                cp = os.pathsep.join([str(target / "classes"), (target / "classpath.txt").read_text().strip()])
+                suffix = ".dylib" if sys.platform == "darwin" else ".so"
+                self.reader = self.start(["java", "-cp", cp, "GroupRice", store,
+                                          self.run / "stores/collection/sim_common/address.bin",
+                                          self.build / ("libregime_time" + suffix)])
+            else:
+                self.reader = self.open("read_records", "collection", self.run/"stores")
             if sharded:
                 self.shards = self.open("shard_search", self.run/"time/collection", self.run/"shards")
         except BaseException:
@@ -24,11 +34,14 @@ class Workers:
             raise
 
     def open(self, name, *args):
-        proc = subprocess.Popen([self.build/name, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=self.env)
+        return self.start([self.build/name, *args])
+
+    def start(self, command):
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=self.env)
         self.stack.callback(self.stop, proc)
         line = proc.stdout.readline()
         if line.strip() != b"READY" and (not line or json.loads(line).get("status") != "ready"):
-            raise RuntimeError(f"{name} failed at startup")
+            raise RuntimeError(f"{command[0]} failed at startup")
         return proc
 
     @staticmethod

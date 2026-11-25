@@ -101,7 +101,7 @@ public:
             maps_.push_back(std::make_unique<Mapping>(p));index_file(*maps_.back(),by_id);
         }
         for(auto& [id,b]:by_id){
-            b.count=ids_from(b.ids,scratch_).size();if(!b.plain_time && b.time.codec==0) index_time_restarts(b);
+            b.count=ids_from(b.ids,scratch_).size();if(b.template_groups.empty() && !b.plain_time && b.time.codec==0) index_time_restarts(b);
             std::array<KDPage,G> ps;
             for(unsigned c=0;c<G;++c)ps[c].open(b.signals[c],cols_[c],b.count);
             pages_.push_back(ps);blocks_.push_back(std::move(b));

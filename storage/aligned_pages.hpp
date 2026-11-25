@@ -191,7 +191,13 @@ struct TimeRestart {
   std::array<U64,4> values;
 };
 #endif
+struct TimeGroup {
+  unsigned first, count, patterns;
+  std::array<const Byte*,4> offsets;
+  const Byte *starts, *ids;
+};
 struct Block {
+  std::vector<TimeGroup> template_groups;
 #ifdef TS_RESTART
   std::vector<TimeRestart> time_packs;
 #endif
@@ -215,6 +221,9 @@ void index_file(const Mapping& file, std::map<int, Block>& blocks) {
           "not a sealed TsFile v4");
   Span in{file.data() + 7, file.data() + file.size()};
   Block* block = nullptr;
+  bool template_header_seen = false;
+  unsigned shared_count = 0, pool_count = 0, reference_width = 0;
+  const Byte* shared_offsets = nullptr;
   for (;;) {
     const unsigned tag = in.byte();
     if (tag == 2) break;
@@ -246,7 +255,7 @@ void index_file(const Mapping& file, std::map<int, Block>& blocks) {
     const unsigned encoding = in.byte();
     if (tag == 0x85) {
       block->plain_time = encoding == 0;
-      require(encoding == 4 || (block->plain_time && codec == 0), "unsupported time page");
+      require(encoding == 4 || ((encoding == 254 || block->plain_time) && codec == 0), "unsupported time page");
     } else {
       require(encoding == 4 || (name != "vector_id" && encoding == 0 && codec == 0),
               "signal or ID encoding changed");
@@ -272,6 +281,48 @@ void index_file(const Mapping& file, std::map<int, Block>& blocks) {
     require(destination->compressed == nullptr && stored == page.left(),
             "split or duplicate page");
     *destination = {page.take(stored), stored, plain, codec};
+    if (tag == 0x85 && encoding == 254) {
+      require(stored == plain, "template page size");
+      Span s{destination->compressed, destination->compressed + stored};
+      if (!template_header_seen) {
+        require(!std::memcmp(s.take(4),"TIM1",4) && s.byte()==kSamples, "template header");
+        shared_count=s.byte();
+        require(shared_count<=4 && s.byte()==2 && s.byte()==0, "template version");
+        pool_count=shared_count;
+        if (!shared_count) {
+          std::uint32_t size;
+          std::memcpy(&size,s.take(4),4);
+          pool_count=size; reference_width=s.byte();
+          require(size>4 && reference_width>0 && reference_width<=4,"invalid template pool");
+        }
+        shared_offsets=s.take(std::size_t(pool_count)*(kSamples-1)*8);
+        template_header_seen=true;
+      }
+      const unsigned n=s.byte();
+      require(n && n<=128, "template page row count");
+      for(unsigned first=0;first<n;) {
+        unsigned count=shared_count?n:s.byte();
+        unsigned patterns=shared_count?shared_count:s.byte();
+        require(count && count<=n-first && patterns && patterns<=4, "template subgroup");
+        std::array<const Byte*,4> offsets{};
+        for(unsigned slot=0;slot<patterns;++slot) {
+          unsigned key=slot;
+          if(!shared_count){
+            key=0;
+            for(unsigned j=0;j<reference_width;++j) key|=unsigned(s.byte())<<(8*j);
+            require(key<pool_count,"template pool index");
+          }
+          offsets[slot]=shared_offsets+std::size_t(key)*(kSamples-1)*8;
+        }
+        const Byte* starts=s.take(count*8);
+        const Byte* ids=s.take((count+3)/4);
+        for(unsigned i=0;i<count;++i)
+          require(((ids[i/4]>>(2*(i%4)))&3u)<patterns,"invalid template ID");
+        block->template_groups.push_back({first,count,patterns,offsets,starts,ids});
+        first+=count;
+      }
+      require(!s.left(),"template trailer");
+    }
   }
 }
 
@@ -339,6 +390,26 @@ std::vector<unsigned> ids_from(const Page& page, std::vector<Byte>& scratch) {
 
 void read_times(const Block& block, unsigned time_slot,
                 std::int64_t* out, std::vector<Byte>& scratch) {
+  if (!block.template_groups.empty()) {
+    const auto& groups=block.template_groups;
+    const auto last=std::upper_bound(groups.begin(),groups.end(),time_slot,
+        [](unsigned row,const TimeGroup& group){return row<group.first;});
+    require(last!=groups.begin(), "template row bounds");
+    const auto& g=*(last-1);
+    const unsigned row=time_slot-g.first;
+    require(row<g.count,"template row outside page");
+    const unsigned id=(g.ids[row/4]>>(2*(row%4)))&3;
+    U64 start;
+    std::memcpy(&start,g.starts+8*row,8);
+    out[0]=std::bit_cast<int64_t>(start);
+    const Byte* offsets=g.offsets[id];
+    for(unsigned j=1;j<kSamples;++j){
+      U64 delta;
+      std::memcpy(&delta,offsets+8*(j-1),8);
+      out[j]=std::bit_cast<int64_t>(start+delta);
+    }
+    return;
+  }
   if (block.plain_time) {
     const auto page = block.time.unpack(scratch);
     const std::size_t offset = time_slot * kSamples * sizeof(std::int64_t);
