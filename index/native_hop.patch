@@ -1,0 +1,68 @@
+--- HNSW.cpp
++++ HNSW.cpp
+@@ -8,0 +9 @@
++#include "native_hop.hpp"
+@@ -1116 +1117 @@
+-template <typename VTType, class C, typename DistanceEvaluator>
++template <typename VTType, class C, bool Gate, typename DistanceEvaluator>
+@@ -1126 +1127 @@
+-        const SearchParameters* params) {
++        const SearchParameters* params, const nh_hop::Params* hop = nullptr) {
+@@ -1151,0 +1153,9 @@
++    bool first_expansion = true;
++    if constexpr (Gate) {
++        FAISS_THROW_IF_NOT(hnsw.max_level == 1 && level == 0 && hop &&
++                           hop->min_start && hop->max_end);
++#if COLLECT_STATS
++        FAISS_THROW_IF_NOT(hop->counts);
++#endif
++        hop->reached = true;
++    }
+@@ -1168,0 +1179,20 @@
++        if constexpr (Gate) {
++            if (first_expansion) {
++                first_expansion = false;
++#if COLLECT_STATS
++                ++hop->counts->entry_bridges;
++#endif
++            } else {
++#if COLLECT_STATS
++                ++hop->counts->expansion_checks;
++#endif
++                if (!hop->overlaps(v0)) {
++#if COLLECT_STATS
++                    ++hop->counts->expansion_pruned;
++#endif
++                    ++nstep;
++                    if (!do_dis_check && nstep > efSearch) break;
++                    continue;
++                }
++            }
++        }
+@@ -1205,2 +1235,16 @@
+-            saved_j[counter] = v1;
+-            counter += vt.set(v1) ? 1 : 0;
++            if constexpr (Gate) {
++                if (!vt.set(v1)) continue;
++#if COLLECT_STATS
++                ++hop->counts->neighbor_checks;
++#endif
++                if (!hop->overlaps(v1)) {
++#if COLLECT_STATS
++                    ++hop->counts->neighbor_pruned;
++#endif
++                    continue;
++                }
++                saved_j[counter++] = v1;
++            } else {
++                saved_j[counter] = v1;
++                counter += vt.set(v1) ? 1 : 0;
++            }
+@@ -1255 +1299,6 @@
+-        return search_from_candidates_fixVT<VTType, C>(
++        if (const auto* hop = dynamic_cast<const nh_hop::Params*>(params)) {
++            return search_from_candidates_fixVT<VTType, C, true>(
++                    hnsw, evaluator, res, candidates, vt_concrete, stats,
++                    level, nres_in, params, hop);
++        }
++        return search_from_candidates_fixVT<VTType, C, false>(
