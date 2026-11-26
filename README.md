@@ -7,6 +7,7 @@ This repository contains the retrieval index, compressed storage implementation 
 | [index](index) | FAISS IVF with a centroid HNSW, weighted-cosine routing and scoring, weighted-distance reranking, time pruning and a four-way ablation |
 | [storage](storage) | Start-time templates, physical position mapping, the eight-byte PLAIN baseline and the legacy decimal codec |
 | [iotdb](iotdb) | Seekable Group-64 Rice encoder and reader, aligned time and value pages, resource metadata writer and SQL UDTF |
+| [oceanbase](oceanbase) | OceanBase SQL range scans and two-stage ranking, with the resident FAISS router and Group-16 block reader |
 | [experiments](experiments) | Preprocessing, build driver, paired benchmark, exhaustive reference, bitwise verification, component timings and SQL bridge |
 | [experiments/public_datasets](experiments/public_datasets) | Public-data block ordering and the archived First-32 comparison |
 | [figures](figures) | Existing plotting utilities and synthetic method examples; filenames retain their earlier numbering |
